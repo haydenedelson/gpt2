@@ -4,8 +4,6 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-
 
 @dataclass
 class GPTConfig:
@@ -19,8 +17,8 @@ class GPTConfig:
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.c_fc = nn.Linear(config.n_embed, 4 * config.n_embed)
-        self.gelu = nn.GELU(approximate='tanh')
+        self.c_fc   = nn.Linear(config.n_embed, 4 * config.n_embed)
+        self.gelu   = nn.GELU(approximate='tanh')
         self.c_proj = nn.Linear(4 * config.n_embed, config.n_embed)
     
     def forward(self, x):
@@ -182,11 +180,16 @@ class GPT(nn.Module):
 
 if __name__ == "__main__":
     import tiktoken
+    from utils import get_device
 
+    device = get_device()
+    print(f"using device {device}")
+
+    # load model
     model = GPT.from_pretrained('gpt2')
     print('weights loaded')
-
     model.eval()
+    model = model.to(device)
 
     # get encoder
     encoder = tiktoken.get_encoding('gpt2')
@@ -197,7 +200,7 @@ if __name__ == "__main__":
     tokens = encoder.encode(prefix)
     tokens = torch.tensor(tokens, dtype=torch.long)
     tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
-    x = tokens.to(DEVICE)
+    x = tokens.to(device)
 
     # generate sequences
     torch.manual_seed(42)
