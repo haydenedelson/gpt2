@@ -1,10 +1,10 @@
 from dataclasses import dataclass
+import inspect
 import math
+import time
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-
-DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
 @dataclass
@@ -19,9 +19,10 @@ class GPTConfig:
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.c_fc = nn.Linear(config.n_embed, 4 * config.n_embed)
-        self.gelu = nn.GELU(approximate='tanh')
+        self.c_fc   = nn.Linear(config.n_embed, 4 * config.n_embed)
+        self.gelu   = nn.GELU(approximate='tanh')
         self.c_proj = nn.Linear(4 * config.n_embed, config.n_embed)
+        self.c_proj._RESIDUAL_SCALE_INIT = 1
     
     def forward(self, x):
         x = self.c_fc(x)
@@ -43,6 +44,7 @@ class CausalSelfAttention(nn.Module):
         self.c_attn = nn.Linear(self.n_embed, 3 * self.n_embed)
         # output projection
         self.c_proj = nn.Linear(self.n_embed, self.n_embed)
+        self.c_proj._RESIDUAL_SCALE_INIT = 1
         # causal mask
         self.register_buffer('bias', torch.tril(torch.ones(config.block_size, config.block_size)
                                                 .view(1, 1, config.block_size, config.block_size)))
@@ -60,11 +62,7 @@ class CausalSelfAttention(nn.Module):
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
 
         # multi-head self-attention
-        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-        # apply causal mask
-        att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
-        att = F.softmax(att, dim=-1)
-        y = att @ v
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         # concatenate head outputs
         y = y.transpose(1, 2).contiguous().view(B, T, C)
 
@@ -99,6 +97,23 @@ class GPT(nn.Module):
             ln_f = nn.LayerNorm(config.n_embed)
         ))
         self.lm_head = nn.Linear(config.n_embed, config.vocab_size, bias=False)
+
+        # tie weights of token embedding matrix to weights of lm head
+        self.transformer.wte.weight = self.lm_head.weight
+
+        # init params - self.apply will apply to all submodules
+        self.apply(self._init_weights)
+    
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            std = 0.02
+            if hasattr(module, '_RESIDUAL_SCALE_INIT'):
+                std *= (2 * self.config.n_layer) ** -0.5
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
     
     @classmethod
     def from_pretrained(cls, model_type):
@@ -156,7 +171,32 @@ class GPT(nn.Module):
         
         return model
     
-    def forward(self, idx):
+    def configure_optimizers(self, weight_decay, learning_rate, device):
+        # get params that require grad
+        param_dict = {param_name: val for param_name, val in self.named_parameters() if val.requires_grad}
+
+        # create optim groups
+        # 2d parameters will be weight decayed, others will not
+        # i.e. biases & layernorms will not be weight decayed
+        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+        nondecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+        optim_groups = [
+            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': nondecay_params, 'weight_decay': 0.0}
+        ]
+
+        num_decay_params = sum(p.numel() for p in decay_params)
+        num_nondecay_params = sum(p.numel() for p in nondecay_params)
+        print(f"num decayed parameter tensors: {len(decay_params)}, num decayed parameters: {num_decay_params:,}")
+        print(f"num non-decayed parameter tensors: {len(nondecay_params)}, num non-decayed parameters: {num_nondecay_params:,}")
+
+        # use fused optimizer version if available
+        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_available and 'cuda' in device
+        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
+        return optimizer
+    
+    def forward(self, idx, targets=None):
         # input is token indices
         # idx is of shape (B, T)
         B, T = idx.shape
@@ -177,34 +217,43 @@ class GPT(nn.Module):
         # forward through final layernorm & classifier
         x = self.transformer.ln_f(x)
         logits = self.lm_head(x) # (B, T, vocab_size)
-        return logits
+
+        # Calculate loss
+        loss = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.shape[-1]), targets.view(-1))
+
+        return logits, loss
 
 
 if __name__ == "__main__":
     import tiktoken
+    from utils import get_device
 
-    model = GPT.from_pretrained('gpt2')
-    print('weights loaded')
+    torch.manual_seed(42)
+    device = get_device()
 
+    # get model
+    model = GPT(GPTConfig())
     model.eval()
-
+    model.to(device)
+    
     # get encoder
     encoder = tiktoken.get_encoding('gpt2')
-    
+
     # encode prefix
-    prefix = "Hello, I'm a language model,"
     num_return_sequences = 5
-    tokens = encoder.encode(prefix)
+    text = "Hello I am GPT. I am a friendly AI."
+    tokens = encoder.encode(text)
     tokens = torch.tensor(tokens, dtype=torch.long)
     tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
-    x = tokens.to(DEVICE)
 
     # generate sequences
-    torch.manual_seed(42)
-    max_length = 30
+    x = tokens.to(device)
+    max_length = 50
     while x.shape[1] < max_length:
         with torch.no_grad():
-            logits = model(x) # (B, T, vocab_size)
+            logits, _ = model(x) # (B, T, vocab_size)
             # take the logits at the last position
             logits = logits[:, -1, :] # (B, vocab_size)
             # get probabilities
@@ -222,4 +271,3 @@ if __name__ == "__main__":
         tokens = x[i].tolist()
         decoded = encoder.decode(tokens)
         print(">", decoded)
-
