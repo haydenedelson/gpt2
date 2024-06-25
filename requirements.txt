@@ -1,0 +1,10 @@
+--index-url https://download.pytorch.org/whl/cu121
+--extra-index-url https://pypi.python.org/simple
+
+numpy>=1.19.0,<1.25.0
+tiktoken
+datasets
+transformers
+torch==2.2.2
+torchvision==0.17.2
+torchaudio==2.2.2
