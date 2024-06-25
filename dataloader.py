@@ -1,23 +1,41 @@
+import numpy as np
+import os
 import torch
 import tiktoken
 
 
+def load_tokens(filename):
+    npt = np.load(filename)
+    ptt = torch.tensor(npt, dtype=torch.long)
+    return ptt
+
+
 class DataLoader:
-    def __init__(self, B, T, process_rank, num_processes):
+    def __init__(self, B, T, process_rank, num_processes, data_root, split):
         self.B = B
         self.T = T
         self.process_rank = process_rank
         self.num_processes = num_processes
-    
-        with open('input.txt', 'r') as f:
-            text = f.read()
-        encoder = tiktoken.get_encoding('gpt2')
-        tokens = encoder.encode(text)
-        self.tokens = torch.tensor(tokens)
-        print(f"loaded {len(self.tokens)} tokens")
-        print(f"1 epoch = {len(self.tokens) // (B * T)} batches")
+        self.data_root = data_root
+        assert split in {'train', 'val'}
+
+        shards = os.listdir(self.data_root)
+        shards = [s for s in shards if split in s]
+        shards = sorted(shards)
+        shards = [os.path.join(self.data_root, s) for s in shards]
+        assert len(shards) > 0, f"no shards found for split {split}"
+        self.shards = shards
+        self.num_shards = len(shards)
+
+        if process_rank == 0:
+            print(f"found {len(shards)} shards for split {split}")
 
         # store state
+        self.reset()
+    
+    def reset(self):
+        self.current_shard = 0
+        self.tokens = load_tokens(self.shards[self.current_shard])
         self.current_position = self.B * self.T * self.process_rank
 
     def next_batch(self):
@@ -30,5 +48,7 @@ class DataLoader:
         self.current_position += B * T * self.num_processes
         # if loading the next batch would be out of bounds, reset
         if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
+            self.current_shard = (self.current_shard + 1) % self.num_shards
+            self.tokens = load_tokens(self.shards[self.current_shard])
             self.current_position = self.B * self.T * self.process_rank
         return x, y

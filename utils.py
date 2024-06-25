@@ -25,3 +25,10 @@ def get_lr(step, min_lr, max_lr, warmup_steps, max_steps):
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
     return min_lr + coeff * (max_lr - min_lr)
 
+
+def update_lr(optimizer, step, min_lr, max_lr, warmup_steps, max_steps):
+    lr = get_lr(step, min_lr, max_lr, warmup_steps, max_steps)
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
+    return lr
+
