@@ -2,7 +2,6 @@ import numpy as np
 import os
 import torch
 import tiktoken
-import dataclasses
 
 
 def load_tokens(filename):
