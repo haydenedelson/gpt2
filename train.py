@@ -87,6 +87,9 @@ def run_one_epoch(model, data_loader, optimizer, device, train, ddp, grad_accum_
 
 @hydra.main(version_base=None, config_path='config', config_name='config')
 def main(cfg: DictConfig):
+    print(cfg)
+    print(cfg.optimizer.params.learning_rate)
+    exit()
     # DDP setup
     # torchrun command sets env variables RANK, LOCAL_RANK, and WORLD_SIZE
     ddp = int(os.environ.get('RANK', -1)) != -1
@@ -109,12 +112,12 @@ def main(cfg: DictConfig):
         print(f"using device {device}")
     device_type = "cuda" if device.startswith("cuda") else "cpu"
 
-    torch.manual_seed(118)
-    torch.set_float32_matmul_precision('high')
+    torch.manual_seed(cfg.seed)
+    torch.set_float32_matmul_precision(cfg.matmul_precision)
 
-    total_batch_size = 8192 # 2**19, ~0.5M tokens per batch
-    B = 4 # micro-batch size
-    T = 256 # sequence length
+    total_batch_size = cfg.dataset.total_batch_size # 2**19, ~0.5M tokens per batch
+    B = cfg.dataset.micro_batch_size # micro-batch size
+    T = cfg.dataset.sequence_len # sequence length
     assert total_batch_size % (B * T * ddp_world_size) == 0, "total_batch_size must be divisible by B * T * ddp_world_size"
     grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
     if master_process:
@@ -122,13 +125,13 @@ def main(cfg: DictConfig):
         print(f"number of gradient accumulation steps: {grad_accum_steps}")
 
     # get data loaders
-    train_loader = DataLoader(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, data_root="edu_fineweb10B", split="train")
-    val_loader = DataLoader(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, data_root="edu_fineweb10B", split="val")
+    train_loader = DataLoader(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, data_root=cfg.dataset.data_root, split="train")
+    val_loader = DataLoader(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, data_root=cfg.dataset.data_root, split="val")
 
     # load model
     # true vocab_size = 50257, but we increase to 50304 to make it a nice number
     # with no impact on functionality
-    model = GPT(GPTConfig(vocab_size=50304))
+    model = GPT(cfg.model)
     num_params = sum(p.numel() for p in model.parameters())
     print(model)
     print(f"parameters: {num_params}")
@@ -141,7 +144,7 @@ def main(cfg: DictConfig):
         print('model compiled')
 
     # configure optimizer with gpt2 original hyperparams
-    optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device)
+    optimizer = model.configure_optimizers(device=device, **cfg.optimizer.params)
 
     if ddp:
         model = DDP(model, device_ids=[ddp_local_rank])
@@ -150,10 +153,10 @@ def main(cfg: DictConfig):
     # get gpt tokenzier for later generation
     encoder = tiktoken.get_encoding('gpt2')
 
-    max_lr = 6e-4
-    min_lr = max_lr * 0.1
-    warmup_steps = 715 # ~ 375M warmup tokens / 2**19 tokens per step (copying GPT3 paper)
-    max_steps = 19073 # ~ 10e9 unique tokens / 2**19 tokens per step
+    max_lr = cfg.scheduler.max_lr
+    min_lr = max_lr * cfg.scheduler.min_lr_frac
+    warmup_steps = cfg.scheduler.warmup_steps # ~ 375M warmup tokens / 2**19 tokens per step (copying GPT3 paper)
+    max_steps = cfg.scheduler.max_steps # ~ 10e9 unique tokens / 2**19 tokens per step
     for step in range(max_steps):
         # validation step
         if step % 100 == 0:

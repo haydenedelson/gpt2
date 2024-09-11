@@ -1,0 +1,4 @@
+warmup_steps: 715
+max_steps: 19073
+max_lr: 0.0006
+min_lr_frac: 0.1

@@ -162,7 +162,7 @@ class GPT(nn.Module):
         
         return model
     
-    def configure_optimizers(self, weight_decay, learning_rate, device):
+    def configure_optimizers(self, device, weight_decay=0.1, learning_rate=6e-4, betas=(0.9, 0.95), eps=1e-8):
         # get params that require grad
         param_dict = {param_name: val for param_name, val in self.named_parameters() if val.requires_grad}
 
@@ -184,7 +184,7 @@ class GPT(nn.Module):
         # use fused optimizer version if available
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fused_available and 'cuda' in device
-        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
+        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, eps=eps, fused=use_fused)
         return optimizer
     
     def forward(self, idx, targets=None):

@@ -1,5 +1,8 @@
 defaults:
 - model: gpt
+- dataset: dataset
+- scheduler: scheduler
+- optimizer: adamw
 
 seed: 1118
 matmul_precision: high
