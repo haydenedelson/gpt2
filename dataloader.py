@@ -16,7 +16,7 @@ class DataLoader:
         self.process_rank = process_rank
         self.num_processes = num_processes
         self.data_root = data_root
-        assert split in {'train', 'val'}
+        assert split in {'train', 'val'}, f"Invalid split: {split}"
 
         shards = os.listdir(self.data_root)
         shards = [s for s in shards if split in s]
