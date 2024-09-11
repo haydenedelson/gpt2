@@ -148,8 +148,8 @@ def main():
 
     max_lr = 6e-4
     min_lr = max_lr * 0.1
-    warmup_steps = 715
-    max_steps = 19073
+    warmup_steps = 715 # ~ 375M warmup tokens / 2**19 tokens per step (copying GPT3 paper)
+    max_steps = 19073 # ~ 10e9 unique tokens / 2**19 tokens per step
     for step in range(max_steps):
         # validation step
         if step % 100 == 0:
