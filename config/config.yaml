@@ -1,0 +1,5 @@
+defaults:
+- model: gpt
+
+seed: 1118
+matmul_precision: high

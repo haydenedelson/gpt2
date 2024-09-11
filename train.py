@@ -1,15 +1,18 @@
+import hydra
 import os
 import tiktoken
 import time
 import torch
 import torch.distributed as dist
-from torch.distributed import init_process_group, destroy_process_group
 import torch.nn.functional as F
+
+from omegaconf import OmegaConf, DictConfig
+from torch.distributed import init_process_group, destroy_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from utils import get_device, get_lr, update_lr
 from dataloader import DataLoader
-from gpt2 import GPT, GPTConfig
+from gpt2 import GPT
 
 
 def generate_text(model, encoder, num_return_sequences, max_length, device, device_type, ddp_rank):
@@ -82,7 +85,8 @@ def run_one_epoch(model, data_loader, optimizer, device, train, ddp, grad_accum_
         return loss_accum, norm
 
 
-def main():
+@hydra.main(version_base=None, config_path='config', config_name='config')
+def main(cfg: DictConfig):
     # DDP setup
     # torchrun command sets env variables RANK, LOCAL_RANK, and WORLD_SIZE
     ddp = int(os.environ.get('RANK', -1)) != -1
@@ -105,7 +109,7 @@ def main():
         print(f"using device {device}")
     device_type = "cuda" if device.startswith("cuda") else "cpu"
 
-    torch.manual_seed(1337)
+    torch.manual_seed(118)
     torch.set_float32_matmul_precision('high')
 
     total_batch_size = 8192 # 2**19, ~0.5M tokens per batch
