@@ -3,15 +3,7 @@ import inspect
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-
-
-@dataclass
-class GPTConfig:
-    block_size: int = 1024
-    vocab_size: int = 50257
-    n_layer: int = 12
-    n_head: int = 12
-    n_embed: int = 768
+from omegaconf import OmegaConf, DictConfig
 
 
 class MLP(nn.Module):
@@ -69,7 +61,7 @@ class CausalSelfAttention(nn.Module):
         return y
 
 
-class Block(nn.Module):
+class SelfAttentionBlock(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.ln_1 = nn.LayerNorm(config.n_embed)
@@ -91,7 +83,7 @@ class GPT(nn.Module):
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embed),
             wpe = nn.Embedding(config.block_size, config.n_embed),
-            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            h = nn.ModuleList([SelfAttentionBlock(config) for _ in range(config.n_layer)]),
             ln_f = nn.LayerNorm(config.n_embed)
         ))
         self.lm_head = nn.Linear(config.n_embed, config.vocab_size, bias=False)
@@ -131,7 +123,7 @@ class GPT(nn.Module):
         config_args = base_configs[model_type]
         config_args['vocab_size'] = 50257
         config_args['block_size'] = 1024
-        config = GPTConfig(**config_args)
+        config = OmegaConf.create(config_args)
 
         # get model
         model = GPT(config)
@@ -145,6 +137,7 @@ class GPT(nn.Module):
 
         # copy weights from hf model
         state_dict_hf_keys = state_dict_hf.keys()
+        # discard masks/buffers from weights
         state_dict_hf_keys = [k for k in state_dict_hf_keys if not k.endswith('.attn.masked_bias')]
         state_dict_hf_keys = [k for k in state_dict_hf_keys if not k.endswith('.attn.bias')]
         # some weights are transposed, need to fix manually
@@ -232,7 +225,8 @@ if __name__ == "__main__":
     device = get_device()
 
     # get model
-    model = GPT(GPTConfig())
+    config = OmegaConf.load('config/model/gpt.yaml')
+    model = GPT(config)
     model.eval()
     model.to(device)
     
