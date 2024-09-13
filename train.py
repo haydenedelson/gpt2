@@ -87,9 +87,6 @@ def run_one_epoch(model, data_loader, optimizer, device, train, ddp, grad_accum_
 
 @hydra.main(version_base=None, config_path='config', config_name='config')
 def main(cfg: DictConfig):
-    print(cfg)
-    print(cfg.optimizer.params.learning_rate)
-    exit()
     # DDP setup
     # torchrun command sets env variables RANK, LOCAL_RANK, and WORLD_SIZE
     ddp = int(os.environ.get('RANK', -1)) != -1
