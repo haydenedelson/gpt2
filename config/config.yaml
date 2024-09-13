@@ -3,6 +3,7 @@ defaults:
 - dataset: dataset
 - scheduler: scheduler
 - optimizer: adamw
+- generation: generation
 
 seed: 1118
 matmul_precision: high

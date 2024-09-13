@@ -1,3 +1,5 @@
+from typing import Union, List, Tuple
+
 import hydra
 import os
 import tiktoken
@@ -9,20 +11,52 @@ import torch.nn.functional as F
 from omegaconf import OmegaConf, DictConfig
 from torch.distributed import init_process_group, destroy_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.nn as nn
 
 from utils import get_device, get_lr, update_lr
 from dataloader import DataLoader
 from gpt2 import GPT
 
+DEFAULT_SEQUENCE_PREFIX = "Hello, I'm a language model,"
 
-def generate_text(model, encoder, num_return_sequences, max_length, device, device_type, ddp_rank):
-    tokens = encoder.encode("Hello, I'm a language model,")
+
+def generate_text(model: nn.Module,
+                  encoder: tiktoken,
+                  sequence_prefix: str,
+                  num_return_sequences: int,
+                  max_length: int,
+                  device: Union[str, torch.device],
+                  device_type: str,
+                  ddp_rank:int,
+                  seed: int) -> List[str]:
+    """Generate text from the model, continuing from some prefix
+    
+    Parameters
+    ----------
+    model (nn.Module): Decoder language model
+    encoder (tiktoken): Sequence tokenizer
+    sequence_prefix (str): Start of the generated text. Can be a blank string, 
+        but including some information helps measure whether the model understands
+        context and construct logical sequences
+    num_return_sequences (int): Number of sequences to generate
+    max_length (int): Maximum length of each sequence (sequence will be cut off mid-word
+        or mid-sentence if it goes longer than this)
+    device (Union[str, torch.device]): Device. {cuda, cpu, or mps}
+    device_type (str): Device type. Needed for autocasting {cuda or cpu}
+    ddp_rank (int): DDP rank/ID of current GPU
+    seed (int): Random seed for generation
+
+    Returns
+    -------
+    List[str]: List of generated text strings
+    """
+    tokens = encoder.encode(sequence_prefix)
     tokens = torch.tensor(tokens, dtype=torch.long)
     tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
     x = tokens.to(device)
     
     sample_rng = torch.Generator(device=device)
-    sample_rng.manual_seed(42 + ddp_rank)
+    sample_rng.manual_seed(seed + ddp_rank)
     while x.size(1) < max_length:
         # forward the model to get the logits
         with torch.no_grad():
@@ -42,14 +76,42 @@ def generate_text(model, encoder, num_return_sequences, max_length, device, devi
             xcol = torch.gather(topk_indices, -1, ix) # (B, 1)
             # append to the sequence
             x = torch.cat((x, xcol), dim=1)
-    # print the generated text
+
+    # print & return the generated text
+    generated_text = []
     for i in range(num_return_sequences):
         tokens = x[i, :max_length].tolist()
         decoded = encoder.decode(tokens)
+        generated_text.append(decoded)
         print(f"rank {ddp_rank} sample {i}: {decoded}")
-    
 
-def run_one_epoch(model, data_loader, optimizer, device, train, ddp, grad_accum_steps):
+    return generated_text
+
+    
+def run_one_epoch(model: nn.Module,
+                  data_loader: DataLoader,
+                  optimizer: torch.optim,
+                  device: Union[str, torch.device],
+                  train: bool,
+                  ddp: bool,
+                  grad_accum_steps: int) -> Tuple[torch.tensor, torch.tensor]:
+    """Run one epoch of training/validation
+    
+    Parameters
+    ----------
+    model (nn.Module): Decoder language model
+    data_loader (DataLoader): Text data loader
+    optimizer (torch.optim): Model optimizer
+    device (Union[str, torch.device]): Device. {cuda, cpu, or mps}
+    train (bool): True if training step, False if validation step
+    ddp (bool): True if doing DDP, false otherwise
+    grad_accum_steps (int): Number of steps over which to accumulate gradients.
+        Equal to total_batch_size // (mini_batch_size * sequence_length * ddp_world_size)
+    
+    Returns
+    -------
+    Tuple[torch.tensor, torch.tensor]: Accumulated loss for the batch & clipped, normalized gradients
+    """
     with torch.set_grad_enabled(train):
         if train:
             optimizer.zero_grad()
@@ -173,9 +235,15 @@ def main(cfg: DictConfig):
         # generate samples
         if step > 0 and step % 100 == 0:
             model.eval()
-            num_return_sequences = 4
-            max_length = 32
-            generate_text(model, encoder, num_return_sequences, max_length, device, device_type, ddp_rank)
+            generate_text(model,
+                          encoder,
+                          cfg.generation.prefix,
+                          cfg.generation.num_return_sequences,
+                          cfg.generation.max_length,
+                          device,
+                          device_type,
+                          ddp_rank,
+                          cfg.seed)
             model.train()
         
         # log training time
