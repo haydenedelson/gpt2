@@ -113,7 +113,7 @@ def main(cfg: DictConfig):
     torch.set_float32_matmul_precision(cfg.matmul_precision)
 
     total_batch_size = cfg.dataset.total_batch_size # 2**19, ~0.5M tokens per batch
-    B = cfg.dataset.micro_batch_size # micro-batch size
+    B = cfg.dataset.mini_batch_size # mini-batch size
     T = cfg.dataset.sequence_len # sequence length
     assert total_batch_size % (B * T * ddp_world_size) == 0, "total_batch_size must be divisible by B * T * ddp_world_size"
     grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
