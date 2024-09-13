@@ -1,25 +1,62 @@
+from typing import Union, List, Tuple
+
+import hydra
 import os
 import tiktoken
 import time
 import torch
 import torch.distributed as dist
-from torch.distributed import init_process_group, destroy_process_group
 import torch.nn.functional as F
+
+from omegaconf import OmegaConf, DictConfig
+from torch.distributed import init_process_group, destroy_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.nn as nn
 
 from utils import get_device, get_lr, update_lr
 from dataloader import DataLoader
-from gpt2 import GPT, GPTConfig
+from gpt2 import GPT
+
+DEFAULT_SEQUENCE_PREFIX = "Hello, I'm a language model,"
 
 
-def generate_text(model, encoder, num_return_sequences, max_length, device, device_type, ddp_rank):
-    tokens = encoder.encode("Hello, I'm a language model,")
+def generate_text(model: nn.Module,
+                  encoder: tiktoken,
+                  sequence_prefix: str,
+                  num_return_sequences: int,
+                  max_length: int,
+                  device: Union[str, torch.device],
+                  device_type: str,
+                  ddp_rank:int,
+                  seed: int) -> List[str]:
+    """Generate text from the model, continuing from some prefix
+    
+    Parameters
+    ----------
+    model (nn.Module): Decoder language model
+    encoder (tiktoken): Sequence tokenizer
+    sequence_prefix (str): Start of the generated text. Can be a blank string, 
+        but including some information helps measure whether the model understands
+        context and construct logical sequences
+    num_return_sequences (int): Number of sequences to generate
+    max_length (int): Maximum length of each sequence (sequence will be cut off mid-word
+        or mid-sentence if it goes longer than this)
+    device (Union[str, torch.device]): Device. {cuda, cpu, or mps}
+    device_type (str): Device type. Needed for autocasting {cuda or cpu}
+    ddp_rank (int): DDP rank/ID of current GPU
+    seed (int): Random seed for generation
+
+    Returns
+    -------
+    List[str]: List of generated text strings
+    """
+    tokens = encoder.encode(sequence_prefix)
     tokens = torch.tensor(tokens, dtype=torch.long)
     tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
     x = tokens.to(device)
     
     sample_rng = torch.Generator(device=device)
-    sample_rng.manual_seed(42 + ddp_rank)
+    sample_rng.manual_seed(seed + ddp_rank)
     while x.size(1) < max_length:
         # forward the model to get the logits
         with torch.no_grad():
@@ -39,14 +76,42 @@ def generate_text(model, encoder, num_return_sequences, max_length, device, devi
             xcol = torch.gather(topk_indices, -1, ix) # (B, 1)
             # append to the sequence
             x = torch.cat((x, xcol), dim=1)
-    # print the generated text
+
+    # print & return the generated text
+    generated_text = []
     for i in range(num_return_sequences):
         tokens = x[i, :max_length].tolist()
         decoded = encoder.decode(tokens)
+        generated_text.append(decoded)
         print(f"rank {ddp_rank} sample {i}: {decoded}")
-    
 
-def run_one_epoch(model, data_loader, optimizer, device, train, ddp, grad_accum_steps):
+    return generated_text
+
+    
+def run_one_epoch(model: nn.Module,
+                  data_loader: DataLoader,
+                  optimizer: torch.optim,
+                  device: Union[str, torch.device],
+                  train: bool,
+                  ddp: bool,
+                  grad_accum_steps: int) -> Tuple[torch.tensor, torch.tensor]:
+    """Run one epoch of training/validation
+    
+    Parameters
+    ----------
+    model (nn.Module): Decoder language model
+    data_loader (DataLoader): Text data loader
+    optimizer (torch.optim): Model optimizer
+    device (Union[str, torch.device]): Device. {cuda, cpu, or mps}
+    train (bool): True if training step, False if validation step
+    ddp (bool): True if doing DDP, false otherwise
+    grad_accum_steps (int): Number of steps over which to accumulate gradients.
+        Equal to total_batch_size // (mini_batch_size * sequence_length * ddp_world_size)
+    
+    Returns
+    -------
+    Tuple[torch.tensor, torch.tensor]: Accumulated loss for the batch & clipped, normalized gradients
+    """
     with torch.set_grad_enabled(train):
         if train:
             optimizer.zero_grad()
@@ -82,7 +147,8 @@ def run_one_epoch(model, data_loader, optimizer, device, train, ddp, grad_accum_
         return loss_accum, norm
 
 
-def main():
+@hydra.main(version_base=None, config_path='config', config_name='config')
+def main(cfg: DictConfig):
     # DDP setup
     # torchrun command sets env variables RANK, LOCAL_RANK, and WORLD_SIZE
     ddp = int(os.environ.get('RANK', -1)) != -1
@@ -105,12 +171,12 @@ def main():
         print(f"using device {device}")
     device_type = "cuda" if device.startswith("cuda") else "cpu"
 
-    torch.manual_seed(1337)
-    torch.set_float32_matmul_precision('high')
+    torch.manual_seed(cfg.seed)
+    torch.set_float32_matmul_precision(cfg.matmul_precision)
 
-    total_batch_size = 8192 # 2**19, ~0.5M tokens per batch
-    B = 4 # micro-batch size
-    T = 256 # sequence length
+    total_batch_size = cfg.dataset.total_batch_size # 2**19, ~0.5M tokens per batch
+    B = cfg.dataset.mini_batch_size # mini-batch size
+    T = cfg.dataset.sequence_len # sequence length
     assert total_batch_size % (B * T * ddp_world_size) == 0, "total_batch_size must be divisible by B * T * ddp_world_size"
     grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
     if master_process:
@@ -118,13 +184,13 @@ def main():
         print(f"number of gradient accumulation steps: {grad_accum_steps}")
 
     # get data loaders
-    train_loader = DataLoader(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, data_root="edu_fineweb10B", split="train")
-    val_loader = DataLoader(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, data_root="edu_fineweb10B", split="val")
+    train_loader = DataLoader(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, data_root=cfg.dataset.data_root, split="train")
+    val_loader = DataLoader(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, data_root=cfg.dataset.data_root, split="val")
 
     # load model
     # true vocab_size = 50257, but we increase to 50304 to make it a nice number
     # with no impact on functionality
-    model = GPT(GPTConfig(vocab_size=50304))
+    model = GPT(cfg.model)
     num_params = sum(p.numel() for p in model.parameters())
     print(model)
     print(f"parameters: {num_params}")
@@ -137,7 +203,7 @@ def main():
         print('model compiled')
 
     # configure optimizer with gpt2 original hyperparams
-    optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device)
+    optimizer = model.configure_optimizers(device=device, **cfg.optimizer.params)
 
     if ddp:
         model = DDP(model, device_ids=[ddp_local_rank])
@@ -146,10 +212,10 @@ def main():
     # get gpt tokenzier for later generation
     encoder = tiktoken.get_encoding('gpt2')
 
-    max_lr = 6e-4
-    min_lr = max_lr * 0.1
-    warmup_steps = 715 # ~ 375M warmup tokens / 2**19 tokens per step (copying GPT3 paper)
-    max_steps = 19073 # ~ 10e9 unique tokens / 2**19 tokens per step
+    max_lr = cfg.scheduler.max_lr
+    min_lr = max_lr * cfg.scheduler.min_lr_frac
+    warmup_steps = cfg.scheduler.warmup_steps # ~ 375M warmup tokens / 2**19 tokens per step (copying GPT3 paper)
+    max_steps = cfg.scheduler.max_steps # ~ 10e9 unique tokens / 2**19 tokens per step
     for step in range(max_steps):
         # validation step
         if step % 100 == 0:
@@ -169,9 +235,15 @@ def main():
         # generate samples
         if step > 0 and step % 100 == 0:
             model.eval()
-            num_return_sequences = 4
-            max_length = 32
-            generate_text(model, encoder, num_return_sequences, max_length, device, device_type, ddp_rank)
+            generate_text(model,
+                          encoder,
+                          cfg.generation.prefix,
+                          cfg.generation.num_return_sequences,
+                          cfg.generation.max_length,
+                          device,
+                          device_type,
+                          ddp_rank,
+                          cfg.seed)
             model.train()
         
         # log training time

@@ -1,0 +1,4 @@
+data_root: edu_fineweb10B
+total_batch_size: 8192
+mini_batch_size: 4
+sequence_len: 64

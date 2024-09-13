@@ -1,0 +1,3 @@
+prefix: "Hello, I'm a language model,"
+num_return_sequences: 5
+max_length: 32

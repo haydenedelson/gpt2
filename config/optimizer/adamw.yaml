@@ -1,0 +1,6 @@
+name: AdamW
+params:
+  weight_decay: 0.1
+  learning_rate: ${scheduler.max_lr}
+  betas: [0.9, 0.95]
+  eps: 0.00000001
